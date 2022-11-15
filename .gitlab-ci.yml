@@ -1,0 +1,69 @@
+stages:
+    - build
+    - test
+    - package
+    - deploy
+variables:
+    APP_VERSION: $CI_PIPELINE_IID
+    APP_ENV_NAME: Reactapp-env
+
+test project:
+    image: node:16.18.0-alpine3.15
+    stage: .pre
+    script:
+        - yarn install
+        - yarn test
+
+linter:
+    image: node:16.18.0-alpine3.15
+    stage: .pre
+    script:
+        - yarn install
+        - yarn lint
+
+build project:
+    image: node:16.18.0-alpine3.15
+    stage: build
+    script:
+        - yarn install
+        - yarn build
+        - echo $APP_VERSION > build/version.html
+    artifacts:
+        paths:
+            - build
+
+test website:
+    image: node:16.18.0-alpine3.15
+    stage: test
+    script:
+        - apk add curl
+        - yarn global add serve
+        - serve -s build &
+        - sleep 10
+        - curl http://localhost:3000 | grep -i "react app"
+
+create docker image:
+    stage: package
+    image: docker:20.10.19-alpine3.16
+    services:
+        - docker:20.10.19-dind-alpine3.16
+    script:
+        - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+        - docker build -t $CI_REGISTRY_IMAGE -t $CI_REGISTRY_IMAGE:$APP_VERSION .
+        - docker push --all-tags $CI_REGISTRY_IMAGE
+
+deploy to aws:
+    stage: deploy
+    image:
+        name: amazon/aws-cli:2.8.3
+        entrypoint: [""]
+    environment: production
+    script:
+        - yum install -y gettext
+        - export DEPLOY_TOKEN=$(echo -n "AWS:"$GITLAB_DEPLOY_TOKEN | base64)
+        - envsubst < templates/Dockerrun.aws.json > Dockerrun.aws.json
+        - envsubst < templates/auth.json > auth.json
+        - aws s3 cp Dockerrun.aws.json s3://$AWS_S3_BUCKET
+        - aws s3 cp auth.json s3://$AWS_S3_BUCKET
+        - aws elasticbeanstalk create-application-version --application-name react-app --version-label $APP_VERSION --source-bundle S3Bucket=$AWS_S3_BUCKET,S3Key=Dockerrun.aws.json
+        - aws elasticbeanstalk update-environment --application-name react-app --version-label $APP_VERSION --environment-name $APP_ENV_NAME
